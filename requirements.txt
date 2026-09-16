@@ -7,3 +7,4 @@ google-auth-httplib2>=0.2
 mcp>=1.19
 reportlab>=4.0
 pypdf>=6.0
+gradio>=4.0

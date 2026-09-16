@@ -47,6 +47,24 @@ which satisfies both requirements at once.
 
 ## Known limitations (first pass)
 
+- **Drive Activity API does not reliably emit VIEW activity for personal
+  (non-Workspace) Gmail viewers, confirmed live.** Two diagnostics: a
+  watermarked PDF shared with and opened by a real second test account
+  (`killianfumez@gmail.com`), and a native Google Doc shared with and opened
+  by the same account -- neither produced a VIEW record in
+  `activity.query()`, only the original create/permission-change events.
+  This rules out a PDF-specific or propagation-delay explanation; it is a
+  platform-level gap in what Drive Activity reports for consumer accounts.
+  `data_room.py grant`'s folder/watermark/restricted-share mechanics are
+  verified working end to end; `data_room.py report`'s view-log is **not**
+  currently a trustworthy signal for real investor contacts (most of whom
+  will be on personal Gmail, per Scout's own research) and should not be
+  read as "no one has looked yet" -- it may simply never register a view at
+  all. Revisit with a purpose-built tool (e.g. Papermark) if per-viewer
+  tracking becomes load-bearing; that migration was scoped and paused on
+  cost/infra grounds (self-host needs its own Next.js/Prisma app plus
+  Resend + Tinybird + S3-compatible storage; hosted access needs Papermark's
+  Data Rooms plan, ~EUR99+/mo).
 - View-log identity resolution is best-effort: Drive Activity returns a
   person resource name, not a resolved email. Confirming it actually
   matches `shared_with_email` needs the People API, not wired up here yet
