@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "raise-gmail": {
+      "command": "python",
+      "args": ["scripts/gmail_mcp_server.py"]
+    }
+  }
+}
