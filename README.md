@@ -183,18 +183,34 @@ python scripts/dashboard.py
 ```
 
 Opens a local Gradio app (default `http://127.0.0.1:7860`, `share=False` —
-never leaves your machine). Three tabs:
+never leaves your machine), built from the founder's seat rather than the
+engineer's: what needs a decision today, not what's architecturally built.
 
-- **Pipeline Overview** — the table above, live, plus the most recent
-  Outreach → Inbox → Data Room activity actually in Postgres.
-- **Live Data Browser** — every table (`investor_file`, `canon_facts`,
-  `question_bank`, `drafts`, `outreach_touches`, `data_room_*`,
-  `activity_log`), read-only, with a Refresh button per table.
-- **Interactive Demo** — render any `question_bank` answer against live
+- **Today** — a morning-briefing landing view: escalated Inbox threads,
+  funds awaiting your approval, overdue/due-soon follow-ups (day-4/day-11
+  cadence), a "mark a note as sent" quick action, and a plain-language
+  recent-activity feed.
+- **Pipeline** — the fundraise board, firms grouped by
+  `investor_file.process_stage`.
+- **Firms** — a full profile per firm (thesis, check size, warm path,
+  why-them, outreach/inbox/data-room history), with Approve/Pass buttons
+  for anything Scout found that you haven't decided on yet.
+- **Fact Sheet** — every `canon_facts` field grouped by category, with a
+  Fresh/Stale/Internal-only/Not-set status chip per field.
+- **Try it** — render any `question_bank` answer against live
   `canon_facts`, or paste a message and run it through the real Inbox
-  classifier. Both are pure reads: nothing is written to `drafts` or
-  `activity_log` from this tab, ever (no `INSERT`/`UPDATE`/`DELETE`
-  anywhere in `dashboard.py`).
+  classifier.
+- **Behind the scenes** — the old build-status table (all 8 specialists)
+  and raw-table browser, kept for when the engineering picture is what's
+  needed.
+
+**Write scope**: two actions only — approving/passing a Scout-sourced fund
+and marking an outreach touch as sent (`scripts/founder_actions.py`,
+reusing `scripts/outreach.py`'s `mark_sent`) — both actions the system
+already treats as founder-gated. Nothing else in `dashboard.py` can
+mutate anything (no `INSERT`/`UPDATE`/`DELETE` appears anywhere in that
+file; grep it to confirm). No draft/send/share capability exists here or
+anywhere else in the codebase.
 
 Only needs Postgres running — no Gmail/Drive OAuth required to use it.
 
@@ -333,7 +349,8 @@ db/
 
 scripts/
   init_db.py                 Applies schema.sql + seed.sql
-  dashboard.py                Read-only Gradio dashboard (see above)
+  dashboard.py                 Founder-facing Gradio dashboard (see above)
+  founder_actions.py            The two founder-gated writes dashboard.py can make (approve/pass a fund)
   render_lib.py               Shared canon_facts template rendering + hygiene checks
   drift_test.py                Stage-1 correctness gate
   question_match.py            Token-overlap question matcher
