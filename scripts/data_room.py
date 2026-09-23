@@ -14,6 +14,7 @@ Usage:
 import argparse
 import os
 import pathlib
+import secrets
 import sys
 from datetime import date, timedelta
 
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import drive_client  # noqa: E402
+import view_tracker  # noqa: E402
 from watermark_pdf import watermark_pdf  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -43,7 +45,15 @@ def _get_root_folder_id(cur, conn):
 
 
 def grant_access(conn, investor_id, tier, email, deck_path, expiry_days=DEFAULT_EXPIRY_DAYS):
-    with conn.cursor() as cur:
+    # Atomic on purpose: conn is autocommit, so without an explicit
+    # transaction a failure partway through (bad deck path, Drive hiccup,
+    # missing tracker env vars) would leave an orphaned data_room_links
+    # row committed with no matching data_room_files row -- which then
+    # blocks every future grant for that investor via
+    # idx_data_room_links_active (one active link per firm). Hit this for
+    # real once already; wrapping the whole thing in one transaction means
+    # any failure rolls back cleanly and a retry just works.
+    with conn.transaction(), conn.cursor() as cur:
         cur.execute("SELECT firm_name, approved FROM investor_file WHERE id = %s", (investor_id,))
         row = cur.fetchone()
         if row is None:
@@ -70,14 +80,32 @@ def grant_access(conn, investor_id, tier, email, deck_path, expiry_days=DEFAULT_
 
         upload = drive_client.upload_and_share(str(watermarked_path), pathlib.Path(deck_path).name, firm_folder_id, email, expiry_date)
 
+        # Own tracking link instead of the raw Drive URL -- Drive Activity
+        # does not reliably report views for personal Gmail viewers (see
+        # workflows/DATA_ROOM_PROCEDURE.md). What the investor actually
+        # receives is the tracker link; the real Drive URL only lives in
+        # the tracker's own Sheet, for the Apps Script to redirect to.
+        sheet_id = os.environ.get("VIEW_TRACKER_SHEET_ID")
+        base_url = os.environ.get("VIEW_TRACKER_BASE_URL")
+        if not sheet_id or not base_url:
+            raise ValueError(
+                "VIEW_TRACKER_SHEET_ID and VIEW_TRACKER_BASE_URL must be set -- "
+                "run `python scripts/view_tracker.py setup` and follow "
+                "workflows/VIEW_TRACKER_SETUP.md first"
+            )
+        token = secrets.token_urlsafe(12)
+        tracker_url = "{}?t={}".format(base_url, token)
+
         cur.execute(
             """
-            INSERT INTO data_room_files (link_id, drive_file_id, filename, share_url, shared_with_email)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
+            INSERT INTO data_room_files (link_id, drive_file_id, filename, share_url, shared_with_email, tracking_token)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
             """,
-            (link_id, upload["file_id"], pathlib.Path(deck_path).name, upload["share_url"], email),
+            (link_id, upload["file_id"], pathlib.Path(deck_path).name, tracker_url, email, token),
         )
         file_row_id = cur.fetchone()[0]
+
+        view_tracker.register_link(sheet_id, token, investor_id, file_row_id, upload["share_url"])
 
         cur.execute(
             "INSERT INTO activity_log (actor, action_type, entity_type, entity_id, details) VALUES (%s,%s,%s,%s,%s)",
@@ -85,14 +113,14 @@ def grant_access(conn, investor_id, tier, email, deck_path, expiry_days=DEFAULT_
              '{{"firm": "{}", "tier": "{}", "email": "{}", "expiry": "{}"}}'.format(firm_name, tier, email, expiry_date)),
         )
 
-    return {"link_id": link_id, "file_id": file_row_id, "share_url": upload["share_url"], "expiry_date": str(expiry_date)}
+    return {"link_id": link_id, "file_id": file_row_id, "share_url": tracker_url, "expiry_date": str(expiry_date)}
 
 
 def morning_report(conn):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT f.id, i.firm_name, f.filename, f.drive_file_id, f.shared_with_email
+            SELECT f.id, i.firm_name, f.filename, f.drive_file_id, f.shared_with_email, f.tracking_token
             FROM data_room_files f
             JOIN data_room_links l ON l.id = f.link_id
             JOIN investor_file i ON i.id = l.investor_id
@@ -107,9 +135,47 @@ def morning_report(conn):
             print("No active data room links.")
             return
 
-        for file_row_id, firm_name, filename, drive_file_id, shared_with_email in files:
-            events = drive_client.list_view_activity(drive_file_id)
+        # One fetch covers every file's tracker events -- group by token
+        # rather than re-fetching the whole sheet per file.
+        sheet_id = os.environ.get("VIEW_TRACKER_SHEET_ID")
+        events_by_token = {}
+        if sheet_id:
+            for event in view_tracker.fetch_events(sheet_id):
+                events_by_token.setdefault(event["token"], []).append(event["viewed_at"])
+
+        for file_row_id, firm_name, filename, drive_file_id, shared_with_email, tracking_token in files:
             print("\n{} -- {}".format(firm_name, filename))
+
+            if tracking_token:
+                # Own tracker is the source of truth for anything granted
+                # after this feature landed. viewer_email is the email the
+                # link was issued to -- the token guarantees that identity
+                # by construction (modulo forwarding, which this cannot
+                # detect: Apps Script exposes no IP/headers to check
+                # against). flagged_unexpected is always FALSE here for the
+                # same reason -- never claim a check that isn't happening.
+                viewed_ats = events_by_token.get(tracking_token, [])
+                if not viewed_ats:
+                    print("  No views recorded.")
+                    continue
+                for viewed_at in viewed_ats:
+                    print("  {}  opened by {}".format(viewed_at, shared_with_email))
+                    cur.execute(
+                        """
+                        INSERT INTO data_room_views (file_id, viewer_email, viewed_at, flagged_unexpected)
+                        VALUES (%s, %s, %s, FALSE)
+                        ON CONFLICT (file_id, viewed_at) DO NOTHING
+                        """,
+                        (file_row_id, shared_with_email, viewed_at),
+                    )
+                continue
+
+            # Legacy fallback for any file granted before the tracker
+            # existed (tracking_token IS NULL) -- Drive Activity, known
+            # unreliable for personal Gmail viewers (see
+            # workflows/DATA_ROOM_PROCEDURE.md), kept only so an old grant
+            # isn't silently unreported.
+            events = drive_client.list_view_activity(drive_file_id)
             if not events:
                 print("  No views recorded.")
                 continue
@@ -120,7 +186,7 @@ def morning_report(conn):
                     """
                     INSERT INTO data_room_views (file_id, viewer_email, viewed_at, flagged_unexpected)
                     VALUES (%s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (file_id, viewed_at) DO NOTHING
                     """,
                     (file_row_id, event["actor_identifier"], event["timestamp"], not event["is_known_user"]),
                 )

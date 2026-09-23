@@ -27,9 +27,14 @@ SCOPES = [
     # Drive -- drive.file only: this app can see/manage only files it
     # creates itself, never the founder's wider Drive.
     "https://www.googleapis.com/auth/drive.file",
-    # Drive Activity -- read-only, needed for the data-room view log
-    # (who opened what, when).
+    # Drive Activity -- read-only. Kept for a rare Workspace-tier
+    # recipient, but no longer the primary data-room view-tracking path
+    # (confirmed unreliable for personal Gmail viewers; see
+    # workflows/DATA_ROOM_PROCEDURE.md and view_tracker.py).
     "https://www.googleapis.com/auth/drive.activity.readonly",
+    # Sheets -- read+write, backs view_tracker.py's own link-click
+    # tracker (the actual view-tracking source of truth now).
+    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 

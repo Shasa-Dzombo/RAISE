@@ -17,9 +17,13 @@ the OAuth grant already set up for Gmail.
 - `scripts/watermark_pdf.py` -- stamps "CONFIDENTIAL -- Prepared for
   {firm} -- Do not distribute" on every page before upload.
 - `scripts/data_room.py` -- orchestration: `grant`, `report`.
+- `scripts/view_tracker.py` -- own link-click view tracker (Google Apps
+  Script + a Sheet), the actual source of `data_room_views` now. See
+  `workflows/VIEW_TRACKER_SETUP.md` for the one-time setup and why this
+  exists instead of relying on Drive Activity.
 - Schema: `data_room_links` (per-firm grant, tier, expiry),
-  `data_room_files` (per-firm watermarked copy, restricted share),
-  `data_room_views` (the log).
+  `data_room_files` (per-firm watermarked copy, restricted share,
+  `tracking_token`), `data_room_views` (the log).
 
 ## Why every share is restricted, never a public link
 
@@ -40,37 +44,34 @@ which satisfies both requirements at once.
      that email, sets a 30-day expiry (Drive honors this natively for
      Workspace recipients; RAISE's own `data_room_links.expiry_date`
      enforces it regardless of recipient type).
-2. `python scripts/data_room.py report` -- the morning report: queries
-   Drive Activity for every active file, logs each view into
-   `data_room_views`, and flags any view Drive could not attribute to the
-   email the link was actually issued to.
+2. `python scripts/data_room.py report` -- the morning report: for any
+   file with a `tracking_token`, pulls new events from the view-tracker
+   Sheet and logs each into `data_room_views` (`viewer_email` is the
+   email the link was issued to, guaranteed by the token being unique
+   per firm+file). Falls back to querying Drive Activity for any older
+   file granted before the tracker existed (`tracking_token IS NULL`).
 
-## Known limitations (first pass)
+## Known limitations
 
-- **Drive Activity API does not reliably emit VIEW activity for personal
-  (non-Workspace) Gmail viewers, confirmed live.** Two diagnostics: a
-  watermarked PDF shared with and opened by a real second test account
-  (`killianfumez@gmail.com`), and a native Google Doc shared with and opened
-  by the same account -- neither produced a VIEW record in
-  `activity.query()`, only the original create/permission-change events.
-  This rules out a PDF-specific or propagation-delay explanation; it is a
-  platform-level gap in what Drive Activity reports for consumer accounts.
-  `data_room.py grant`'s folder/watermark/restricted-share mechanics are
-  verified working end to end; `data_room.py report`'s view-log is **not**
-  currently a trustworthy signal for real investor contacts (most of whom
-  will be on personal Gmail, per Scout's own research) and should not be
-  read as "no one has looked yet" -- it may simply never register a view at
-  all. Revisit with a purpose-built tool (e.g. Papermark) if per-viewer
-  tracking becomes load-bearing; that migration was scoped and paused on
-  cost/infra grounds (self-host needs its own Next.js/Prisma app plus
-  Resend + Tinybird + S3-compatible storage; hosted access needs Papermark's
-  Data Rooms plan, ~EUR99+/mo).
-- View-log identity resolution is best-effort: Drive Activity returns a
-  person resource name, not a resolved email. Confirming it actually
-  matches `shared_with_email` needs the People API, not wired up here yet
-  -- for now, `flagged_unexpected` is set whenever Drive could not name a
-  known user at all, not a true email-match check. Treat an unflagged view
-  as "someone signed in," not yet as proven-correct-recipient.
+- **Fixed**: Drive Activity API does not reliably emit VIEW activity for
+  personal (non-Workspace) Gmail viewers, confirmed live twice (a PDF and
+  a native Google Doc, both opened by a real second test account,
+  neither producing a VIEW record). That ruled out self-hosting
+  Papermark (needs its own Next.js/Prisma app plus Resend + Tinybird +
+  S3-compatible storage) or paying for its hosted Data Rooms plan
+  (~EUR99+/mo) as overkill for what was actually needed. Fixed instead
+  with RAISE's own link-click tracker (`scripts/view_tracker.py`, a free
+  Google Apps Script Web App) -- see `workflows/VIEW_TRACKER_SETUP.md`.
+  This is now the primary path; Drive Activity is kept only as a fallback
+  for any file granted before the tracker existed.
+- The tracker's own limitation, carried over rather than solved: no
+  device/browser/IP data (Apps Script's `doGet` exposes neither), so
+  `flagged_unexpected` is always `FALSE` on tracker-sourced rows -- there
+  is no signal to detect a forwarded link with. `viewer_email` on a
+  tracker-sourced view is the email the link was issued to, guaranteed by
+  the token's construction (one token per firm+file) rather than by
+  resolving an identity after the fact -- stronger attribution than Drive
+  Activity ever gave, just without the forwarding check.
 - Drive's own link-expiration (`expirationTime`) only applies reliably to
   Google Workspace accounts; a personal Gmail recipient may retain access
   past the stated expiry at the Drive layer even though RAISE's own record

@@ -4,12 +4,17 @@ since you last looked. Pipeline/Firms/Fact Sheet give the founder's actual
 mental model of a raise. "Behind the scenes" keeps the old build-status +
 raw-table view for when the engineering picture is what's needed.
 
-Write surface is deliberately narrow: approve/pass a fund and mark an
+Write surface is deliberately narrow and every mutation is the founder
+explicitly initiating something they'd otherwise type as a CLI command,
+never RAISE deciding to act on its own: approve/pass a fund and mark an
 outreach touch as sent (scripts/founder_actions.py, reusing
-scripts/outreach.py's mark_sent) -- the only two actions investor_file/
-outreach_touches already treat as founder-gated. Nothing here can draft,
-send, or share anything; no Gmail/Drive mutation exists in this file.
-Every other query is a plain SELECT.
+scripts/outreach.py's mark_sent), and granting Data Room access
+(reusing scripts/data_room.py's grant_access -- creates a Drive folder,
+watermarks and uploads the deck, shares it with exactly the email the
+founder typed in, and registers a tracking link, exactly as the CLI
+does). No draft/send capability exists here or anywhere in this
+codebase -- Gmail has no send/reply function defined, full stop. Every
+other query in this file is a plain SELECT.
 
 Usage:
     python scripts/dashboard.py
@@ -29,6 +34,7 @@ from render_lib import check_question, load_facts  # noqa: E402
 from classify_thread import classify  # noqa: E402
 import outreach  # noqa: E402
 import founder_actions  # noqa: E402
+import data_room  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -727,6 +733,27 @@ def do_pass(investor_id, reason):
     return "Passed on {}.".format(firm), html, vis
 
 
+def do_grant_access(investor_id, tier, email, deck_path, expiry_days):
+    if investor_id is None:
+        return "Pick a firm first.", "", gr.update(visible=False)
+    if not email or not email.strip():
+        return "Enter a recipient email first.", "", gr.update(visible=False)
+    if not deck_path:
+        return "Upload a deck PDF first.", "", gr.update(visible=False)
+    try:
+        with _connect() as conn:
+            result = data_room.grant_access(
+                conn, int(investor_id), tier, email.strip(), deck_path,
+                int(expiry_days) if expiry_days else data_room.DEFAULT_EXPIRY_DAYS,
+            )
+    except Exception as exc:
+        html, vis = render_firm_profile(investor_id)
+        return "⚠️ {}".format(exc), html, vis
+    html, vis = render_firm_profile(investor_id)
+    status = "✅ Granted {} tier -- share this link: {}".format(tier, result["share_url"])
+    return status, html, vis
+
+
 def render_fact_sheet():
     sql = """
         SELECT field_key, field_label, category, value, unit, as_of_date, source, refresh_by, agent_quotable
@@ -818,11 +845,29 @@ with gr.Blocks(title="RAISE Dashboard") as demo:
             pass_reason = gr.Textbox(label="Pass reason (optional)")
             firm_action_status = gr.Markdown()
 
+        with gr.Group():
+            gr.Markdown("### Grant Data Room access")
+            gr.Markdown(
+                "Creates a per-firm Drive folder, watermarks the deck, uploads it, shares it with "
+                "exactly the email below, and registers a tracking link -- the same "
+                "`data_room.grant_access()` the CLI uses. `full` tier is refused unless the firm is "
+                "approved."
+            )
+            with gr.Row():
+                grant_tier = gr.Dropdown(choices=["teaser", "standard", "full"], value="teaser", label="Tier")
+                grant_email = gr.Textbox(label="Recipient email")
+                grant_expiry = gr.Number(label="Expiry (days)", value=data_room.DEFAULT_EXPIRY_DAYS, precision=0)
+            grant_deck = gr.File(label="Deck PDF", type="filepath", file_types=[".pdf"])
+            grant_btn = gr.Button("Grant access", variant="primary")
+            grant_status = gr.Markdown()
+
         firm_view_btn.click(fn=render_firm_profile, inputs=firm_dd, outputs=[firm_profile_html, approve_group])
         approve_btn.click(fn=do_approve, inputs=firm_dd,
                            outputs=[firm_action_status, firm_profile_html, approve_group])
         pass_btn.click(fn=do_pass, inputs=[firm_dd, pass_reason],
                         outputs=[firm_action_status, firm_profile_html, approve_group])
+        grant_btn.click(fn=do_grant_access, inputs=[firm_dd, grant_tier, grant_email, grant_deck, grant_expiry],
+                         outputs=[grant_status, firm_profile_html, approve_group])
 
     with gr.Tab("📑 Fact Sheet"):
         factsheet_html = gr.HTML(render_fact_sheet())

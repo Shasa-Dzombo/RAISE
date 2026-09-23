@@ -194,25 +194,36 @@ engineer's: what needs a decision today, not what's architecturally built.
   `investor_file.process_stage`.
 - **Firms** — a full profile per firm (thesis, check size, warm path,
   why-them, outreach/inbox/data-room history), with Approve/Pass buttons
-  for anything Scout found that you haven't decided on yet.
+  for anything Scout found that you haven't decided on yet, and a Grant
+  Data Room access form (tier, recipient email, deck upload) that runs
+  the exact same `data_room.grant_access()` the CLI uses.
 - **Fact Sheet** — every `canon_facts` field grouped by category, with a
   Fresh/Stale/Internal-only/Not-set status chip per field.
-- **Try it** — render any `question_bank` answer against live
-  `canon_facts`, or paste a message and run it through the real Inbox
-  classifier.
+- **Try it** — have an actual back-and-forth conversation with RAISE
+  (you play the VC); each message runs through the real Inbox handling
+  ladder live, so you see exactly what gets drafted vs. escalated. Plus
+  a lighter single-question lookup against `question_bank`.
 - **Behind the scenes** — the old build-status table (all 8 specialists)
   and raw-table browser, kept for when the engineering picture is what's
   needed.
 
-**Write scope**: two actions only — approving/passing a Scout-sourced fund
-and marking an outreach touch as sent (`scripts/founder_actions.py`,
-reusing `scripts/outreach.py`'s `mark_sent`) — both actions the system
-already treats as founder-gated. Nothing else in `dashboard.py` can
-mutate anything (no `INSERT`/`UPDATE`/`DELETE` appears anywhere in that
-file; grep it to confirm). No draft/send/share capability exists here or
-anywhere else in the codebase.
+**Write scope**: every mutation is the founder explicitly initiating
+something they could otherwise type as a CLI command — never RAISE
+deciding to act on its own. Three actions: approving/passing a
+Scout-sourced fund and marking an outreach touch as sent
+(`scripts/founder_actions.py`, reusing `scripts/outreach.py`'s
+`mark_sent`), and granting Data Room access (reusing
+`scripts/data_room.py`'s `grant_access` — creates a Drive folder,
+watermarks and uploads the deck, shares it with exactly the email typed
+in, registers a tracking link). No `INSERT`/`UPDATE`/`DELETE` appears
+anywhere in `dashboard.py` itself (grep it to confirm) — every write is
+delegated to those already-existing, already-tested functions. No
+draft/send capability exists here or anywhere else in the codebase.
 
-Only needs Postgres running — no Gmail/Drive OAuth required to use it.
+Granting Data Room access needs the Google OAuth + view-tracker setup
+(see [Google OAuth setup](#google-oauth-setup) and
+`workflows/VIEW_TRACKER_SETUP.md`); every other tab only needs Postgres
+running.
 
 ---
 

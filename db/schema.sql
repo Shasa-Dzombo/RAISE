@@ -350,3 +350,19 @@ CREATE TABLE outreach_touches (
 
 CREATE UNIQUE INDEX idx_outreach_touches_investor_touch ON outreach_touches (investor_id, touch_number);
 CREATE INDEX idx_outreach_touches_status ON outreach_touches (status);
+
+-- ============================================================================
+-- VIEW TRACKER ADDITIONS (own link-click tracker, replaces Drive Activity
+-- API as the data_room_views source -- see scripts/view_tracker.py and
+-- workflows/DATA_ROOM_PROCEDURE.md for why)
+-- ============================================================================
+
+ALTER TABLE data_room_files
+    ADD COLUMN tracking_token TEXT UNIQUE;  -- NULL for any pre-tracker rows
+
+-- morning_report() has always inserted with ON CONFLICT DO NOTHING, but no
+-- unique index ever backed it -- a latent no-op that would have silently
+-- double-inserted on a repeat report() run. Needed for real now: fetch_events()
+-- re-reads the full events sheet every call and relies on this for dedup.
+CREATE UNIQUE INDEX idx_data_room_views_file_viewed_at
+    ON data_room_views (file_id, viewed_at);
