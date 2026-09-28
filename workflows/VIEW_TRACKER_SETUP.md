@@ -6,9 +6,11 @@ viewers -- see `workflows/DATA_ROOM_PROCEDURE.md`). No new account, no
 new cost -- everything here runs on the Google account already
 connected for Gmail/Drive.
 
-What this tracker tells you: **a link was opened, when, and how many
-times.** Not who/what device/browser -- Google Apps Script's `doGet`
-does not expose request headers or IP, only the query string. See
+What this tracker tells you: **a link was opened, when, how many times,
+whether it was actually clicked through (not just a scanner pre-fetch),
+and a best-effort "how many distinct browsers opened this."** Not
+who/what device/browser -- Google Apps Script's `doGet` does not expose
+request headers or IP, only the query string. See
 `scripts/view_tracker.py`'s module docstring for the full tradeoff
 (Cloudflare Workers would add device/IP data if that's ever needed
 later; swapping to it changes nothing on RAISE's Postgres side).
@@ -52,6 +54,23 @@ var SHEET_ID = 'PASTE_YOUR_VIEW_TRACKER_SHEET_ID_HERE';
 function doGet(e) {
   var token = e.parameter.t;
   var ss = SpreadsheetApp.openById(SHEET_ID);
+
+  // A confirm ping is a background beacon (navigator.sendBeacon, fired
+  // from the click handler below) -- it never renders a page, just logs
+  // that the investor actually clicked through, not merely that the
+  // tracker link loaded (which a scanner pre-fetch could also trigger).
+  // visitor_id only exists here, not on the initial "loaded" log below --
+  // it can only be read via client JS, and the loaded log deliberately
+  // stays server-side-only so it still fires even in a browser that
+  // blocks our card entirely (confirmed with Brave -- see Known
+  // limitations). A "distinct visitors" count is therefore a read on
+  // confirmed clicks only, which is arguably the more meaningful signal
+  // anyway.
+  if (e.parameter.confirm) {
+    ss.getSheetByName('events').appendRow([token, new Date().toISOString(), 'confirmed', e.parameter.v || '']);
+    return ContentService.createTextOutput('');
+  }
+
   var tokens = ss.getSheetByName('tokens').getDataRange().getValues();
   var driveUrl = null;
   for (var i = 1; i < tokens.length; i++) {
@@ -62,7 +81,9 @@ function doGet(e) {
   }
   // The view is logged right here, the moment the link is opened --
   // before the click below even happens.
-  ss.getSheetByName('events').appendRow([token, new Date().toISOString()]);
+  ss.getSheetByName('events').appendRow([token, new Date().toISOString(), 'loaded', '']);
+
+  var deployUrl = ScriptApp.getService().getUrl();
 
   // Apps Script sandboxes doGet output in an iframe that blocks any
   // script- or meta-refresh-driven top-level navigation (a deliberate
@@ -82,7 +103,16 @@ function doGet(e) {
              'text-decoration:none;border-radius:6px;font-size:14px;font-weight:500}' +
              '</style></head>' +
              '<body><div class="card"><p>Your document is ready.</p>' +
-             '<a href="' + driveUrl + '" target="_top">View document</a></div></body></html>';
+             '<a id="viewLink" href="' + driveUrl + '" target="_top">View document</a></div>' +
+             '<script>' +
+             'document.getElementById("viewLink").addEventListener("click", function() {' +
+             'var v; try { v = localStorage.getItem("raiseVisitorId"); if (!v) { ' +
+             'v = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)); ' +
+             'localStorage.setItem("raiseVisitorId", v); } } catch (err) { v = ""; }' +
+             'navigator.sendBeacon(' + JSON.stringify(deployUrl) + ' + "?t=' + token + '&confirm=1&v=" + encodeURIComponent(v || ""));' +
+             '});' +
+             '</script>' +
+             '</body></html>';
   return HtmlService.createHtmlOutput(html);
 }
 ```
@@ -122,6 +152,22 @@ should show that view, with a timestamp and the recipient's email.
 Running `report` again immediately should **not** duplicate the row --
 `data_room_views` now has a unique index on `(file_id, viewed_at)`.
 
+Click "View document" on the card (rather than closing the tab) and
+run `report` again -- it should now print a second line, "confirmed
+click-through," and `data_room_views.confirmed` should flip to `TRUE`
+for that row.
+
+**Visitor-id persistence check** -- do this before trusting the
+"distinct visitors" number for anything real: open the same tracker
+link twice from the same real browser, a few minutes apart (close the
+tab in between), clicking "View document" both times. Read back both
+`visitor_id` values from the `events` sheet. If they match, the
+heuristic works. If they differ, `localStorage` isn't persisting across
+visits inside Apps Script's sandboxed iframe (a real possibility --
+its subdomain is dynamically named per session) -- treat "distinct
+visitors" as unreliable and don't read anything into it until this is
+re-verified.
+
 ## Known limitations
 
 - **Privacy-hardened browsers can block the card entirely, confirmed live.**
@@ -146,8 +192,14 @@ Running `report` again immediately should **not** duplicate the row --
   no nested cross-domain iframe, so this specific failure mode wouldn't
   exist -- swapping to it changes nothing on RAISE's Postgres side.
 - No device/browser/IP data -- see the top of this doc.
-- No forwarding detection -- `flagged_unexpected` is always `FALSE` on
-  tracker-sourced rows, since there's no signal to compare against.
+- **Forwarding detection is a heuristic, not proof.** `flagged_unexpected`
+  is still always `FALSE` on tracker-sourced rows -- no real signal backs
+  it. The `visitor_id` / "distinct visitors" count is a real signal, but
+  a soft one: the same person opening the link on two devices looks
+  identical to two different people, and it never persists across an
+  incognito session. Treat a high distinct-visitor count as "worth a
+  look," never as confirmed forwarding -- and don't trust it at all
+  until the persistence check above has passed at least once.
 - Corporate email security scanners (Microsoft Defender Safe Links,
   similar Google-side scanning, some proxies) can pre-fetch a link
   before a human clicks it -- this can log a false early "view." Not

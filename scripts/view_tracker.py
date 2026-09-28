@@ -12,11 +12,14 @@ back new view events at report time.
 
 Known limitation: Apps Script's doGet(e) event object exposes no HTTP
 headers -- no user-agent, no IP. This tracks "opened, when, how many
-times," never who/what device/browser, and cannot detect a forwarded
-link. If that ever matters, the tracker's backend can be swapped for
-Cloudflare Workers (which does see headers/IP) without changing anything
-on RAISE's Postgres side -- this module's only contract is
-(token, viewed_at) events in, nothing about where they came from.
+times, confirmed-clicked-through or not," and best-effort "how many
+distinct browser contexts" via a client-side visitor id -- never
+who/what device/browser, and the visitor-id forwarding signal is a
+heuristic, not proof (see workflows/VIEW_TRACKER_SETUP.md). If real
+device/IP data ever matters, the tracker's backend can be swapped for
+Cloudflare Workers without changing anything on RAISE's Postgres side --
+this module's only contract is events in, nothing about where they
+came from.
 
 Usage:
     python scripts/view_tracker.py setup
@@ -36,9 +39,9 @@ from google_auth import get_credentials  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 TOKENS_HEADER = ["token", "investor_id", "file_id", "drive_url", "created_at"]
-EVENTS_HEADER = ["token", "viewed_at"]
+EVENTS_HEADER = ["token", "viewed_at", "type", "visitor_id"]
 TOKENS_RANGE = "tokens!A:E"
-EVENTS_RANGE = "events!A:B"
+EVENTS_RANGE = "events!A:D"
 
 
 def _sheets():
@@ -86,7 +89,11 @@ def fetch_events(spreadsheet_id):
     """Reads every logged view event. Full re-fetch each call -- dedup
     happens at the Postgres insert (unique index on
     data_room_views(file_id, viewed_at)), not a watermark here, so a
-    missed report() run can never lose an event."""
+    missed report() run can never lose an event.
+
+    Tolerates old 2-column rows (token, viewed_at) written before the
+    confirmed-open/visitor-id columns existed -- treated as type='loaded'
+    with no visitor_id, rather than dropped."""
     resp = _sheets().spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=EVENTS_RANGE
     ).execute()
@@ -95,7 +102,12 @@ def fetch_events(spreadsheet_id):
     for row in rows[1:]:  # skip header
         if len(row) < 2:
             continue
-        events.append({"token": row[0], "viewed_at": row[1]})
+        events.append({
+            "token": row[0],
+            "viewed_at": row[1],
+            "type": row[2] if len(row) > 2 and row[2] else "loaded",
+            "visitor_id": row[3] if len(row) > 3 and row[3] else None,
+        })
     return events
 
 

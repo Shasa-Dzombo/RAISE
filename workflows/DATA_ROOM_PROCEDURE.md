@@ -12,8 +12,9 @@ the OAuth grant already set up for Gmail.
 - `scripts/google_auth.py` -- one shared OAuth token, Gmail + Drive +
   Drive Activity scopes (`drive.file` only: this app sees only files it
   creates, never the founder's wider Drive).
-- `scripts/drive_client.py` -- create folders, upload + restricted-share a
-  file to one specific email, read view activity.
+- `scripts/drive_client.py` -- create folders, upload + share a file
+  ("anyone with the link, reader" -- see below for why), read view
+  activity (legacy fallback only, see Known limitations).
 - `scripts/watermark_pdf.py` -- stamps "CONFIDENTIAL -- Prepared for
   {firm} -- Do not distribute" on every page before upload.
 - `scripts/data_room.py` -- orchestration: `grant`, `report`.
@@ -25,14 +26,20 @@ the OAuth grant already set up for Gmail.
   `data_room_files` (per-firm watermarked copy, restricted share,
   `tracking_token`), `data_room_views` (the log).
 
-## Why every share is restricted, never a public link
+## Why every share is "anyone with the link," not restricted to one email
 
-Two independent reasons converge on the same design: SPECIALISTS.md
-requires "unique link, never shared across firms," and Drive can only
-attribute a view to a named identity when the file was shared with that
-person's specific email -- a public "anyone with the link" share gives
-little to no usable view log. So every grant targets exactly one email,
-which satisfies both requirements at once.
+Changed from the original design. SPECIALISTS.md's "unique link, never
+shared across firms" still holds -- each firm gets its own folder and
+its own file copy -- but the share itself is no longer restricted to one
+email. It used to be, on the theory that Drive could attribute a view to
+that identity. It never actually could for personal Gmail viewers (see
+Known limitations below), and the restriction caused a real "you need
+access" / sign-in friction point once RAISE's own tracker took over
+attribution instead. The tracker token now *is* the identity, by
+construction (one token per firm+file) -- so the Drive-level restriction
+was pure friction with no remaining upside. Real access control now lives
+entirely in the tracker link itself (96 bits of randomness), the same
+model DocSend/Papermark links use.
 
 ## Procedure
 
@@ -40,10 +47,14 @@ which satisfies both requirements at once.
    - `full` tier is refused unless `investor_file.approved = TRUE` for that
      row -- full access still requires explicit founder approval per firm.
    - Creates `{Firm Name} -- {tier}` folder under one root Drive folder,
-     watermarks the deck for that firm, uploads it, shares with exactly
-     that email, sets a 30-day expiry (Drive honors this natively for
-     Workspace recipients; RAISE's own `data_room_links.expiry_date`
-     enforces it regardless of recipient type).
+     watermarks the deck for that firm, uploads it, shares it as "anyone
+     with the link, reader." `email` is still recorded (for reporting)
+     but no longer restricts who can open the file. Drive's own
+     `expirationTime` isn't supported on "anyone"-type permissions, so a
+     grant always falls back to relying on RAISE's own
+     `data_room_links.expiry_date` for enforcement (never silently
+     fails over this -- the retry-without-expiry path is now the
+     expected path, not an edge case).
 2. `python scripts/data_room.py report` -- the morning report: for any
    file with a `tracking_token`, pulls new events from the view-tracker
    Sheet and logs each into `data_room_views` (`viewer_email` is the
@@ -72,10 +83,11 @@ which satisfies both requirements at once.
   the token's construction (one token per firm+file) rather than by
   resolving an identity after the fact -- stronger attribution than Drive
   Activity ever gave, just without the forwarding check.
-- Drive's own link-expiration (`expirationTime`) only applies reliably to
-  Google Workspace accounts; a personal Gmail recipient may retain access
-  past the stated expiry at the Drive layer even though RAISE's own record
-  considers it expired. `grant_access` retries without it if Drive rejects
-  the field, so a grant never silently fails over this.
+- Drive's `expirationTime` field isn't supported on "anyone"-type
+  permissions at all -- a recipient may retain Drive-level access past
+  the stated expiry even though RAISE's own record considers it expired.
+  `grant_access` always retries without it, so a grant never silently
+  fails over this; expiry enforcement is entirely on RAISE's side
+  (`data_room_links.expiry_date`), not Drive's.
 - No morning-report automation/schedule yet -- run `report` manually or
   wire it to a scheduled task.

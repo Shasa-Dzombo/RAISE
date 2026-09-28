@@ -366,3 +366,24 @@ ALTER TABLE data_room_files
 -- re-reads the full events sheet every call and relies on this for dedup.
 CREATE UNIQUE INDEX idx_data_room_views_file_viewed_at
     ON data_room_views (file_id, viewed_at);
+
+-- ============================================================================
+-- VIEW TRACKER METRICS ADDITIONS (confirmed-open signal + forwarding
+-- heuristic -- see scripts/view_tracker.py, scripts/data_room.py,
+-- workflows/VIEW_TRACKER_SETUP.md)
+-- ============================================================================
+
+-- A "loaded" event fires the instant the tracker link is opened (before any
+-- click); "confirmed" fires only when the investor actually clicks "View
+-- document" (navigator.sendBeacon, fired from the click handler). Distinguishes
+-- a real open from an email-security-scanner pre-fetch.
+ALTER TABLE data_room_views
+    ADD COLUMN confirmed BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Best-effort forwarding signal: a client-generated persistent id (localStorage).
+-- Distinct visitor_ids against the same file is a *heuristic* for forwarding,
+-- not proof -- also triggers on the same person switching devices, and never
+-- persists across incognito sessions. NULL until proven to actually persist
+-- across separate visits (see workflows/VIEW_TRACKER_SETUP.md verification).
+ALTER TABLE data_room_views
+    ADD COLUMN visitor_id TEXT;

@@ -141,7 +141,7 @@ def morning_report(conn):
         events_by_token = {}
         if sheet_id:
             for event in view_tracker.fetch_events(sheet_id):
-                events_by_token.setdefault(event["token"], []).append(event["viewed_at"])
+                events_by_token.setdefault(event["token"], []).append(event)
 
         for file_row_id, firm_name, filename, drive_file_id, shared_with_email, tracking_token in files:
             print("\n{} -- {}".format(firm_name, filename))
@@ -150,24 +150,52 @@ def morning_report(conn):
                 # Own tracker is the source of truth for anything granted
                 # after this feature landed. viewer_email is the email the
                 # link was issued to -- the token guarantees that identity
-                # by construction (modulo forwarding, which this cannot
-                # detect: Apps Script exposes no IP/headers to check
-                # against). flagged_unexpected is always FALSE here for the
-                # same reason -- never claim a check that isn't happening.
-                viewed_ats = events_by_token.get(tracking_token, [])
-                if not viewed_ats:
+                # by construction (modulo forwarding, which visitor_id gives
+                # a best-effort heuristic on -- see workflows/
+                # VIEW_TRACKER_SETUP.md). flagged_unexpected is always FALSE
+                # here -- never claim a check that isn't happening.
+                token_events = events_by_token.get(tracking_token, [])
+                if not token_events:
                     print("  No views recorded.")
                     continue
-                for viewed_at in viewed_ats:
-                    print("  {}  opened by {}".format(viewed_at, shared_with_email))
+                for event in token_events:
+                    if event["type"] == "confirmed":
+                        # A real click-through, not just the tracker page
+                        # loading -- mark the most recent not-yet-confirmed
+                        # view for this file. No matching "loaded" row (e.g.
+                        # its INSERT hasn't been processed yet this run, or
+                        # was already confirmed) is a silent no-op, not an
+                        # error -- a missed confirm is not worth failing over.
+                        cur.execute(
+                            """
+                            UPDATE data_room_views SET confirmed = TRUE
+                            WHERE id = (SELECT id FROM data_room_views
+                                        WHERE file_id = %s AND confirmed = FALSE
+                                        ORDER BY viewed_at DESC LIMIT 1)
+                            """,
+                            (file_row_id,),
+                        )
+                        print("  {}  confirmed click-through by {}".format(event["viewed_at"], shared_with_email))
+                        continue
+
+                    print("  {}  opened by {}".format(event["viewed_at"], shared_with_email))
                     cur.execute(
                         """
-                        INSERT INTO data_room_views (file_id, viewer_email, viewed_at, flagged_unexpected)
-                        VALUES (%s, %s, %s, FALSE)
+                        INSERT INTO data_room_views (file_id, viewer_email, viewed_at, flagged_unexpected, visitor_id)
+                        VALUES (%s, %s, %s, FALSE, %s)
                         ON CONFLICT (file_id, viewed_at) DO NOTHING
+                        RETURNING id
                         """,
-                        (file_row_id, shared_with_email, viewed_at),
+                        (file_row_id, shared_with_email, event["viewed_at"], event["visitor_id"]),
                     )
+                    if cur.fetchone() is not None:
+                        # Genuinely new view (not a re-import of an already-
+                        # seen row) -- surface it in Today's activity feed.
+                        cur.execute(
+                            "INSERT INTO activity_log (actor, action_type, entity_type, entity_id, details) VALUES (%s,%s,%s,%s,%s)",
+                            ("Data room", "view_recorded", "data_room_files", str(file_row_id),
+                             '{{"firm": "{}", "filename": "{}"}}'.format(firm_name, filename)),
+                        )
                 continue
 
             # Legacy fallback for any file granted before the tracker

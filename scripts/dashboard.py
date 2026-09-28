@@ -35,6 +35,7 @@ from classify_thread import classify  # noqa: E402
 import outreach  # noqa: E402
 import founder_actions  # noqa: E402
 import data_room  # noqa: E402
+import scout_orchestrator  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -483,6 +484,8 @@ def describe_activity(actor, action_type, details):
         return "✅ You {} {}".format(_detail(details, "decision", "decided on"), firm or "a firm")
     if action_type == "draft_survival_measured":
         return "📊 Measured draft survival for a sent note"
+    if action_type == "view_recorded":
+        return "👁️ {} opened {}".format(firm or "Someone", _detail(details, "filename", "a file"))
     return "• {} &mdash; {}".format(actor, action_type)
 
 
@@ -613,6 +616,98 @@ def render_pipeline():
     return '<div class="pipeline-row">{}</div>'.format("".join(columns_html))
 
 
+def _data_room_rollup(investor_id=None):
+    """One row per active data_room_links grant, with view rollups.
+    Shared by the Data Room tab and the Firm profile's Data Room section."""
+    sql = """
+        SELECT i.id, i.firm_name, l.tier, f.id AS file_id, f.filename, l.expiry_date,
+               count(v.id) AS view_count,
+               count(v.id) FILTER (WHERE v.confirmed) AS confirmed_count,
+               count(DISTINCT v.visitor_id) FILTER (WHERE v.visitor_id IS NOT NULL) AS distinct_visitors,
+               min(v.viewed_at) AS first_viewed,
+               max(v.viewed_at) AS last_viewed
+        FROM data_room_links l
+        JOIN investor_file i ON i.id = l.investor_id
+        JOIN data_room_files f ON f.link_id = l.id
+        LEFT JOIN data_room_views v ON v.file_id = f.id
+        WHERE l.revoked_at IS NULL
+    """
+    params = []
+    if investor_id is not None:
+        sql += " AND i.id = %s"
+        params.append(investor_id)
+    sql += """
+        GROUP BY i.id, i.firm_name, l.tier, f.id, f.filename, l.expiry_date
+        ORDER BY last_viewed DESC NULLS LAST, view_count DESC
+    """
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def render_data_room():
+    rows = _data_room_rollup()
+    if not rows:
+        return '<p class="chain-empty">No active data room grants yet.</p>'
+
+    cards = []
+    for (_investor_id, firm_name, tier, _file_id, filename, expiry_date, view_count, confirmed_count,
+         distinct_visitors, _first_viewed, last_viewed) in rows:
+        recency = "last viewed {}".format(last_viewed) if last_viewed else "not viewed yet"
+        visitor_note = " &middot; {} distinct visitor(s)".format(distinct_visitors) if distinct_visitors else ""
+        cards.append(
+            '<div class="today-card"><h4>{firm}</h4>'
+            '<p>{tier} tier &middot; {filename} &middot; expires {expiry}</p>'
+            '<p class="today-meta">{views} open(s), {confirmed} confirmed{visitors} &middot; {recency}</p>'
+            '</div>'.format(
+                firm=firm_name, tier=tier, filename=filename, expiry=expiry_date,
+                views=view_count, confirmed=confirmed_count, visitors=visitor_note, recency=recency,
+            )
+        )
+    return "".join(cards)
+
+
+def do_run_scout(capital_type, max_candidates):
+    if not capital_type:
+        return "Pick a capital type first.", gr.Dropdown(choices=get_firm_choices())
+    try:
+        result = scout_orchestrator.run(
+            capital_type, max_candidates=int(max_candidates) if max_candidates else 3,
+            max_turns=25, verbose=False,
+        )
+    except RuntimeError as exc:
+        return "⚠️ {}".format(exc), gr.Dropdown(choices=get_firm_choices())
+    except Exception as exc:  # noqa: BLE001
+        return "⚠️ Scout run failed: {}".format(exc), gr.Dropdown(choices=get_firm_choices())
+
+    proposed = result["proposed"]
+    if proposed:
+        cards = "".join(
+            '<div class="today-card"><h4>🔭 {firm}</h4>'
+            '<p class="today-meta">investor_file.id={id_} &middot; awaiting your approval in the Firms tab</p></div>'
+            .format(firm=p["firm_name"], id_=p["investor_file_id"])
+            for p in proposed
+        )
+    else:
+        cards = '<p class="chain-empty">No new candidates proposed this run (may have all been existing firms).</p>'
+
+    warning = ""
+    if result["hit_max_turns"]:
+        warning = (
+            '<p class="today-meta">⚠️ Hit the turn limit before the model wrapped up on its own -- '
+            "any candidates above still saved correctly, but give sources extra scrutiny.</p>"
+        )
+    summary = ""
+    if result["final_message"]:
+        summary = "<p>{}</p>".format(result["final_message"].replace("\n", "<br>"))
+
+    status = (
+        "<p>✅ Proposed {} candidate(s) for {}. Every row is unapproved -- review in the Firms tab before "
+        "Outreach can touch any of them.</p>".format(len(proposed), CAPITAL_TYPE_LABEL.get(capital_type, capital_type))
+    )
+    return status + warning + summary + cards, gr.Dropdown(choices=get_firm_choices())
+
+
 def get_firm_choices():
     sql = "SELECT id, firm_name, capital_type FROM investor_file ORDER BY firm_name"
     with _connect() as conn, conn.cursor() as cur:
@@ -655,11 +750,7 @@ def render_firm_profile(investor_id):
         )
         drafts_rows = cur.fetchall()
 
-        cur.execute(
-            "SELECT tier, expiry_date, created_at FROM data_room_links WHERE investor_id = %s ORDER BY created_at DESC",
-            (investor_id,),
-        )
-        dr_rows = cur.fetchall()
+    dr_rows = _data_room_rollup(investor_id=investor_id)
 
     check_size = "-"
     if check_min or check_max:
@@ -696,8 +787,13 @@ def render_firm_profile(investor_id):
     ) or '<p class="chain-empty">No inbound classified yet.</p>'
 
     dr_html = "".join(
-        '<p class="today-meta">{} tier, expires {}, granted {}</p>'.format(tier, exp, created)
-        for tier, exp, created in dr_rows
+        '<p class="today-meta">{} tier &middot; {} open(s), {} confirmed{} &middot; expires {} &middot; {}</p>'.format(
+            tier, view_count, confirmed_count,
+            " &middot; {} distinct visitor(s)".format(distinct_visitors) if distinct_visitors else "",
+            expiry_date, "last viewed {}".format(last_viewed) if last_viewed else "not viewed yet",
+        )
+        for (_inv_id, _firm, tier, _file_id, _filename, expiry_date, view_count, confirmed_count,
+             distinct_visitors, _first_viewed, last_viewed) in dr_rows
     ) or '<p class="chain-empty">No data room access granted yet.</p>'
 
     status_badge = (
@@ -868,6 +964,38 @@ with gr.Blocks(title="RAISE Dashboard") as demo:
                         outputs=[firm_action_status, firm_profile_html, approve_group])
         grant_btn.click(fn=do_grant_access, inputs=[firm_dd, grant_tier, grant_email, grant_deck, grant_expiry],
                          outputs=[grant_status, firm_profile_html, approve_group])
+
+    with gr.Tab("👁️ Data Room"):
+        gr.Markdown(
+            "Every active grant, ranked by who's actually engaging -- most recently "
+            "opened first. This is the direct answer to \"who should I follow up with.\""
+        )
+        data_room_html = gr.HTML(render_data_room())
+        data_room_refresh = gr.Button("🔄 Refresh", size="sm")
+        data_room_refresh.click(fn=render_data_room, outputs=data_room_html)
+
+    with gr.Tab("🔭 Scout"):
+        gr.Markdown(
+            "Runs the standalone Scout orchestrator (`scripts/scout_orchestrator.py`) -- an open-weights "
+            "model researching one capital type at a time via live web search, proposing candidate funds. "
+            "**Every proposal lands as an unapproved `investor_file` row, exactly like Scout's interactive "
+            "work.** Nothing here can act on anyone: the model only ever inserts a candidate for you to "
+            "review in the Firms tab, notes prefixed `[AI-drafted -- verify sources before approving]`. "
+            "A run typically takes 1-2 minutes."
+        )
+        with gr.Row():
+            scout_capital_type = gr.Dropdown(
+                choices=[(label, value) for value, label in CAPITAL_TYPE_LABEL.items()],
+                value="africa_focused_vc", label="Capital type",
+            )
+            scout_max_candidates = gr.Number(label="Max candidates this run", value=3, precision=0, minimum=1, maximum=10)
+        scout_run_btn = gr.Button("🔭 Run Scout", variant="primary")
+        scout_status = gr.HTML()
+
+        scout_run_btn.click(
+            fn=do_run_scout, inputs=[scout_capital_type, scout_max_candidates],
+            outputs=[scout_status, firm_dd],
+        )
 
     with gr.Tab("📑 Fact Sheet"):
         factsheet_html = gr.HTML(render_fact_sheet())
