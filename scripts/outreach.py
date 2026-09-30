@@ -17,6 +17,9 @@ import sys
 import psycopg
 from dotenv import load_dotenv
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import gmail_client  # noqa: E402
 from outreach_templates import draft_first_note  # noqa: E402
