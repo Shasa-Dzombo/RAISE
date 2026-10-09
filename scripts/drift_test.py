@@ -1,9 +1,10 @@
 """Render every question_bank answer from canon_facts alone and report drift risk.
 
-This is the Stage 1 gate: "numbers stop drifting across repeated tests." Answers
-are templates ({{field_key}} placeholders) resolved at read time from
+This is the Stage 1 gate: "numbers stop drifting across repeated tests."
+Answers are templates ({{field_key}} placeholders) resolved at read time from
 canon_facts, so a correctly-authored template cannot drift on its own -- it can
-only be MISSING (fact not loaded yet) or STALE (fact past its refresh_by date).
+only be MISSING (fact not loaded yet), UNSOURCED/UNDATED, or STALE (fact past
+its refresh_by date).
 
 Two classes of problem are reported:
 
@@ -14,6 +15,8 @@ Two classes of problem are reported:
 
   Expected-at-this-stage findings (reported, do not fail the run):
     - MISSING: the field_key exists but canon_facts.value is still NULL
+    - UNSOURCED: the field has a value but source is missing
+    - UNDATED: the field has a value but as_of_date is missing
     - STALE: the field has a value but refresh_by has passed
     - NOT QUOTABLE: the field is marked agent_quotable = false and must never
       be cited in agent output
@@ -84,8 +87,11 @@ def main() -> None:
 
     print("\n" + "-" * 72)
     print(f"{len(questions)} questions checked")
-    print(f"{pass_count} pass (fully sourced, fresh, sendable)")
-    print(f"{missing_or_stale_count} not sendable (missing/stale/restricted fact -- expected before the fact sheet is loaded)")
+    print(f"{pass_count} pass (fully sourced, dated, fresh, sendable)")
+    print(
+        f"{missing_or_stale_count} not sendable (missing/unsourced/undated/"
+        "stale/restricted fact -- expected before the fact sheet is loaded)"
+    )
     print(f"{hygiene_error_count} template-hygiene errors (raw numbers or dangling field references)")
 
     if hygiene_error_count > 0:

@@ -11,6 +11,26 @@
 --     load_dotenv('.env'); \
 --     psycopg.connect(os.environ['DATABASE_URL'], autocommit=True).execute(pathlib.Path('db/seed_pseudo_fixture.sql').read_text())"
 
+UPDATE canon_facts SET value = '"Amara Osei"', as_of_date = '2026-08-31',
+    source = 'Founder (pseudo test data)', refresh_by = '2027-08-31'
+WHERE field_key = 'founder_name';
+
+UPDATE canon_facts SET value = '"Mazao Analytics"', as_of_date = '2026-08-31',
+    source = 'Founder (pseudo test data)', refresh_by = '2027-08-31'
+WHERE field_key = 'company_name';
+
+UPDATE canon_facts SET value = '"Agritech"', as_of_date = '2026-08-31',
+    source = 'Founder (pseudo test data)', refresh_by = '2027-08-31'
+WHERE field_key = 'sector';
+
+INSERT INTO story_pack (section_key, version, content, is_signed, signed_by, signed_at)
+VALUES (
+    'one_liner', 1,
+    'real-time crop pricing and buyer matching for smallholder farmers, delivered over SMS and a lightweight app.',
+    TRUE, 'Amara Osei', '2026-08-31'
+)
+ON CONFLICT (section_key, version) DO NOTHING;
+
 UPDATE canon_facts SET
     value = '"KES and UGX (blended); reported in USD at prevailing spot for investor reporting"',
     as_of_date = '2026-08-31', source = 'Mazao Analytics management accounts (pseudo test data)', refresh_by = '2026-11-30'

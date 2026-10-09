@@ -103,11 +103,15 @@ SPECIALISTS = [
      "detail": "Drive folders, PDF watermarking, and restricted per-firm sharing verified live. View-tracking "
                "(data_room.py report) does not work for personal Gmail viewers &mdash; documented in "
                "DATA_ROOM_PROCEDURE.md."},
-    {"num": 6, "name": "Scheduler", "icon": "📅", "status": "none", "detail": "No script exists yet."},
+    {"num": 6, "name": "Scheduler", "icon": "📅", "status": "partial",
+     "detail": "Calendar-truth proposals and founder-selected tentative holds are implemented; "
+               "accepted meetings remain authoritative and provider failures escalate."},
     {"num": 7, "name": "Pipeline", "icon": "📊", "status": "none",
-     "detail": "investor_file.process_stage tracks stage; the Pipeline tab above now visualizes it, but there's "
-               "still no weekly-review/report script."},
-    {"num": 8, "name": "Terms", "icon": "📄", "status": "none", "detail": "No script exists yet."},
+     "detail": "investor_file.process_stage tracks stage and the Pipeline tab visualizes it; "
+               "weekly review data is available through scripts/pipeline.py."},
+    {"num": 8, "name": "Terms", "icon": "📄", "status": "partial",
+     "detail": "Immutable offer capture and neutral comparison exist in scripts/terms.py; "
+               "the agent never negotiates or makes commitment decisions."},
 ]
 
 STATUS_BADGE = {
@@ -339,7 +343,7 @@ CLASSIFICATION_EXPLAIN = {
     "known_question_draft": "Matched an approved answer and drafted a reply from canon_facts.",
     "unknown_question_escalate": "No question_bank match -- RAISE won't guess, so this goes to you.",
     "legal_price_personal_escalate": "Legal, price, or personal language -- always escalated, never auto-answered.",
-    "meeting_request_flag": "Meeting request -- Scheduler isn't built yet, so this is flagged for you.",
+    "meeting_request_flag": "Meeting request -- hand off to Scheduler for founder-approved slot proposals.",
     "data_room_request_flag": "Data room request -- flagged for you to grant access.",
     "thread_locked_skip": "You already replied in this thread -- RAISE stays out.",
     "do_not_contact_skip": "This sender is on the do-not-contact list.",
@@ -486,6 +490,10 @@ def describe_activity(actor, action_type, details):
         return "📊 Measured draft survival for a sent note"
     if action_type == "view_recorded":
         return "👁️ {} opened {}".format(firm or "Someone", _detail(details, "filename", "a file"))
+    if action_type == "scheduling_slots_proposed":
+        return "📅 Scheduler proposed meeting slots"
+    if action_type == "scheduling_hold_created":
+        return "📅 You created a tentative meeting hold"
     return "• {} &mdash; {}".format(actor, action_type)
 
 
@@ -504,8 +512,9 @@ def render_today():
     part, today_str = _greeting()
     escalated = get_escalated_items()
     pending = get_pending_approvals()
+    scheduling = get_scheduling_items()
     followups = get_followups_due()
-    need_count = len(escalated) + len(pending) + len(followups)
+    need_count = len(escalated) + len(pending) + len(scheduling["requests"]) + len(scheduling["slots"]) + len(followups)
 
     header = (
         '<h2>Good {part}, {name}</h2>'
@@ -532,6 +541,22 @@ def render_today():
             .format(firm=firm_name, capital_type=CAPITAL_TYPE_LABEL.get(capital_type, capital_type),
                     thesis=(thesis or "")[:160], source=source or "unknown", date=source_date or "")
         )
+    for request_id, firm_name, email, request_text, status, updated_at in scheduling["requests"]:
+        cards.append(
+            '<div class="today-card"><h4>📅 {firm} requested a meeting</h4>'
+            '<p>{text}</p><p class="today-meta">{email} &middot; {status} &middot; {when}</p></div>'
+            .format(firm=firm_name or "A contact", text=(request_text or "")[:180],
+                    email=email or "email unavailable", status=status, when=updated_at)
+        )
+    for slot_id, firm_name, email, start, end, timezone, status in scheduling["slots"]:
+        cards.append(
+            '<div class="today-card"><h4>📅 Select a proposed slot for {firm}</h4>'
+            '<p>{start} – {end} ({timezone})</p>'
+            '<p class="today-meta">{email} &middot; slot #{slot_id} &middot; {status}</p></div>'
+            .format(firm=firm_name or "a contact", start=start, end=end,
+                    timezone=timezone or "UTC", email=email or "email unavailable",
+                    slot_id=slot_id, status=status)
+        )
     for item in followups:
         status = "overdue" if item["overdue"] else "due soon"
         cards.append(
@@ -553,6 +578,79 @@ def render_today():
         activity_html = '<p class="chain-empty">Nothing logged yet.</p>'
 
     return top_html, activity_html
+
+
+def get_scheduling_items():
+    """Return founder decisions and proposed slots surfaced by Scheduler."""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id, i.firm_name, r.requested_by_email, r.request_text,
+                   r.status, r.updated_at
+            FROM scheduling_requests r
+            LEFT JOIN investor_file i ON i.id = r.investor_id
+            WHERE r.status = 'awaiting_founder'
+            ORDER BY r.updated_at
+            """
+        )
+        requests = cur.fetchall()
+        cur.execute(
+            """
+            SELECT s.id, i.firm_name, r.requested_by_email, s.slot_start,
+                   s.slot_end, s.recipient_timezone, s.status
+            FROM scheduling_slots s
+            JOIN scheduling_requests r ON r.id = s.request_id
+            LEFT JOIN investor_file i ON i.id = r.investor_id
+            WHERE s.status = 'proposed'
+            ORDER BY s.slot_start
+            """
+        )
+        slots = cur.fetchall()
+    return {"requests": requests, "slots": slots}
+
+
+def get_scheduling_request_choices():
+    return [
+        ("{} -- {}".format(firm or email, (text or "meeting request")[:90]), request_id)
+        for request_id, firm, email, text, _status, _updated_at in get_scheduling_items()["requests"]
+    ]
+
+
+def get_scheduling_slot_choices():
+    return [
+        ("{} -- {} ({})".format(firm or email, start, timezone or "UTC"), slot_id)
+        for slot_id, firm, email, start, _end, timezone, _status in get_scheduling_items()["slots"]
+    ]
+
+
+def do_approve_scheduling_request(request_id):
+    if request_id is None:
+        return (
+            "Pick a meeting request first.", *render_today(),
+            gr.Dropdown(choices=get_scheduling_request_choices()),
+            gr.Dropdown(choices=get_scheduling_slot_choices()),
+        )
+    with _connect() as conn:
+        founder_actions.approve_scheduling_request(conn, int(request_id))
+    top, activity = render_today()
+    return (
+        "✅ Scheduler approved to propose slots (it will not create a Calendar hold).",
+        top,
+        activity,
+        gr.Dropdown(choices=get_scheduling_request_choices()),
+        gr.Dropdown(choices=get_scheduling_slot_choices()),
+    )
+
+
+def do_approve_scheduling_slot(slot_id):
+    if slot_id is None:
+        return "Pick a proposed slot first.", *render_today(), gr.Dropdown(choices=get_scheduling_slot_choices())
+    with _connect() as conn:
+        founder_actions.approve_scheduling_slot(conn, int(slot_id))
+    top, activity = render_today()
+    return "✅ Tentative Calendar hold created for the selected slot.", top, activity, gr.Dropdown(
+        choices=get_scheduling_slot_choices()
+    )
 
 
 def get_drafted_touches_choices():
@@ -909,16 +1007,54 @@ with gr.Blocks(title="RAISE Dashboard") as demo:
             sent_btn = gr.Button("Mark as sent", variant="primary")
             sent_status = gr.Markdown()
 
-        gr.Markdown("### Recently happened")
-        today_activity = gr.HTML(_today_activity0)
-        today_refresh = gr.Button("🔄 Refresh", size="sm")
+            with gr.Group():
+                gr.Markdown("### Scheduler decisions")
+                gr.Markdown(
+                    "Scheduler proposes slots automatically after you approve a request. "
+                    "It never creates a Calendar hold until you select a proposed slot here."
+                )
+                scheduling_request_dd = gr.Dropdown(
+                    choices=get_scheduling_request_choices(), label="Meeting request awaiting approval"
+                )
+                scheduling_request_btn = gr.Button("Approve request and propose slots", variant="primary")
+                scheduling_request_status = gr.Markdown()
+                scheduling_slot_dd = gr.Dropdown(
+                    choices=get_scheduling_slot_choices(), label="Proposed slot"
+                )
+                scheduling_slot_btn = gr.Button("Create tentative Calendar hold", variant="primary")
+                scheduling_slot_status = gr.Markdown()
 
-        def _refresh_today():
-            top, activity = render_today()
-            return top, activity, gr.Dropdown(choices=get_drafted_touches_choices())
+            gr.Markdown("### Recently happened")
+            today_activity = gr.HTML(_today_activity0)
+            today_refresh = gr.Button("🔄 Refresh", size="sm")
 
-        today_refresh.click(fn=_refresh_today, outputs=[today_top, today_activity, sent_dd])
-        sent_btn.click(fn=do_mark_sent, inputs=sent_dd, outputs=[sent_status, today_top, today_activity, sent_dd])
+            def _refresh_today():
+                top, activity = render_today()
+                return (
+                    top, activity,
+                    gr.Dropdown(choices=get_drafted_touches_choices()),
+                    gr.Dropdown(choices=get_scheduling_request_choices()),
+                    gr.Dropdown(choices=get_scheduling_slot_choices()),
+                )
+
+            today_refresh.click(
+                fn=_refresh_today,
+                outputs=[today_top, today_activity, sent_dd, scheduling_request_dd, scheduling_slot_dd],
+            )
+            sent_btn.click(fn=do_mark_sent, inputs=sent_dd, outputs=[sent_status, today_top, today_activity, sent_dd])
+            scheduling_request_btn.click(
+                fn=do_approve_scheduling_request,
+                inputs=scheduling_request_dd,
+                outputs=[
+                    scheduling_request_status, today_top, today_activity,
+                    scheduling_request_dd, scheduling_slot_dd,
+                ],
+            )
+            scheduling_slot_btn.click(
+                fn=do_approve_scheduling_slot,
+                inputs=scheduling_slot_dd,
+                outputs=[scheduling_slot_status, today_top, today_activity, scheduling_slot_dd],
+            )
 
     with gr.Tab("📊 Pipeline"):
         gr.Markdown(

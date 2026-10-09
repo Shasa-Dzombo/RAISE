@@ -126,6 +126,44 @@ CREATE INDEX idx_investor_file_process_stage ON investor_file (process_stage);
 CREATE INDEX idx_investor_file_capital_type ON investor_file (capital_type);
 CREATE UNIQUE INDEX idx_investor_file_firm_partner ON investor_file (firm_name, COALESCE(partner_email, ''));
 
+-- CONTACTS AND SENDER MAILBOXES
+-- Recipient domains are transport metadata, not eligibility rules. A firm may
+-- have several people, aliases, or changed addresses over the life of a raise.
+-- Provider credentials are never stored here.
+CREATE TABLE contact_identities (
+    id                  BIGSERIAL PRIMARY KEY,
+    investor_id         INTEGER REFERENCES investor_file (id) ON DELETE SET NULL,
+    display_name        TEXT,
+    email_address       TEXT NOT NULL,
+    normalized_email     TEXT NOT NULL,
+    email_domain        TEXT NOT NULL,
+    role                TEXT,
+    is_primary           BOOLEAN NOT NULL DEFAULT FALSE,
+    is_verified          BOOLEAN NOT NULL DEFAULT FALSE,
+    active               BOOLEAN NOT NULL DEFAULT TRUE,
+    source               TEXT,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (normalized_email)
+);
+
+CREATE INDEX idx_contact_identities_investor ON contact_identities (investor_id, active);
+CREATE INDEX idx_contact_identities_domain ON contact_identities (email_domain);
+
+CREATE TABLE sender_mailboxes (
+    id                  BIGSERIAL PRIMARY KEY,
+    provider             TEXT NOT NULL CHECK (provider IN ('gmail', 'microsoft_graph', 'zoho', 'smtp')),
+    mailbox_address      TEXT NOT NULL,
+    normalized_address   TEXT NOT NULL UNIQUE,
+    display_name         TEXT,
+    active              BOOLEAN NOT NULL DEFAULT TRUE,
+    draft_only          BOOLEAN NOT NULL DEFAULT TRUE,
+    calendar_id          TEXT,
+    approval_policy      TEXT NOT NULL DEFAULT 'founder_required',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ============================================================================
 -- QUESTION BANK
 -- Diligence answers are templates resolved at read time from canon_facts —
@@ -218,6 +256,154 @@ CREATE INDEX idx_activity_log_occurred_at ON activity_log (occurred_at);
 CREATE INDEX idx_activity_log_actor ON activity_log (actor);
 CREATE INDEX idx_activity_log_entity ON activity_log (entity_type, entity_id);
 
+CREATE TABLE outbound_fact_quotes (
+    id                  BIGSERIAL PRIMARY KEY,
+    thread_ref          TEXT,
+    investor_id         INTEGER REFERENCES investor_file (id),
+    field_key           TEXT NOT NULL REFERENCES canon_facts (field_key),
+    value_snapshot      JSONB NOT NULL,
+    source_snapshot     TEXT NOT NULL,
+    as_of_date_snapshot DATE NOT NULL,
+    quoted_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    quoted_by           TEXT NOT NULL
+);
+
+CREATE INDEX idx_outbound_fact_quotes_field ON outbound_fact_quotes (field_key, quoted_at);
+
+-- ============================================================================
+-- MANAGER CONTROL PLANE -- explicit locks, escalations, and justified changes
+-- ============================================================================
+
+CREATE TABLE thread_controls (
+    thread_ref          TEXT PRIMARY KEY,
+    investor_id         INTEGER REFERENCES investor_file (id),
+    founder_locked      BOOLEAN NOT NULL DEFAULT FALSE,
+    lock_reason         TEXT,
+    locked_at           TIMESTAMPTZ,
+    locked_by           TEXT,
+    preflight_failures  INTEGER NOT NULL DEFAULT 0,
+    last_failure_reason TEXT,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE escalations (
+    id                  BIGSERIAL PRIMARY KEY,
+    thread_ref          TEXT,
+    investor_id         INTEGER REFERENCES investor_file (id),
+    escalation_type      TEXT NOT NULL,
+    reason               TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'open'
+                            CHECK (status IN ('open', 'acknowledged', 'resolved')),
+    created_by           TEXT NOT NULL,
+    resolved_by          TEXT,
+    resolved_at          TIMESTAMPTZ,
+    resolution_note      TEXT,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_escalations_open ON escalations (status, created_at)
+    WHERE status <> 'resolved';
+
+-- ============================================================================
+-- SCHEDULER -- Calendar remains authoritative; these rows are coordination
+-- metadata and never replace Google Calendar events.
+-- ============================================================================
+
+CREATE TABLE fundraising_calendar_blocks (
+    id                  SERIAL PRIMARY KEY,
+    weekday              SMALLINT NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+    start_local          TIME NOT NULL,
+    end_local            TIME NOT NULL CHECK (end_local > start_local),
+    timezone             TEXT NOT NULL,
+    active               BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE scheduling_requests (
+    id                  BIGSERIAL PRIMARY KEY,
+    investor_id         INTEGER REFERENCES investor_file (id),
+    thread_ref          TEXT NOT NULL,
+    requested_by_email   TEXT,
+    requested_timezone   TEXT,
+    request_text        TEXT,
+    status               TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'awaiting_founder', 'proposed',
+                                'held', 'booked', 'expired', 'released',
+                                'escalated'
+                            )),
+    founder_approval_required BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE scheduling_slots (
+    id                  BIGSERIAL PRIMARY KEY,
+    request_id           BIGINT NOT NULL REFERENCES scheduling_requests (id) ON DELETE CASCADE,
+    calendar_event_id    TEXT,
+    slot_start           TIMESTAMPTZ NOT NULL,
+    slot_end             TIMESTAMPTZ NOT NULL CHECK (slot_end > slot_start),
+    recipient_timezone   TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'proposed'
+                            CHECK (status IN ('proposed', 'held', 'booked', 'expired', 'released')),
+    hold_expires_at      TIMESTAMPTZ,
+    chased_at            TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (request_id, slot_start, slot_end)
+);
+
+CREATE INDEX idx_scheduling_slots_active ON scheduling_slots (slot_start, status)
+    WHERE status IN ('proposed', 'held', 'booked');
+CREATE UNIQUE INDEX idx_scheduling_requests_thread
+    ON scheduling_requests (thread_ref);
+
+-- ============================================================================
+-- PIPELINE -- immutable transition evidence plus derived board state
+-- ============================================================================
+
+CREATE TABLE pipeline_events (
+    id                  BIGSERIAL PRIMARY KEY,
+    investor_id         INTEGER NOT NULL REFERENCES investor_file (id),
+    event_type          TEXT NOT NULL,
+    from_stage          TEXT,
+    to_stage            TEXT,
+    heat_before         TEXT,
+    heat_after          TEXT,
+    source_entity_type  TEXT,
+    source_entity_id    TEXT,
+    evidence            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    occurred_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    recorded_by         TEXT NOT NULL
+);
+
+CREATE INDEX idx_pipeline_events_investor ON pipeline_events (investor_id, occurred_at);
+CREATE INDEX idx_pipeline_events_type ON pipeline_events (event_type, occurred_at);
+
+CREATE TABLE pipeline_reviews (
+    id                  BIGSERIAL PRIMARY KEY,
+    review_period_start DATE NOT NULL,
+    review_period_end   DATE NOT NULL,
+    report_text         TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'generated'
+                            CHECK (status IN ('generated', 'reviewed', 'archived')),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
+-- TERMS SAFETY LANE -- preserve the offer, never interpret or negotiate it
+-- ============================================================================
+
+CREATE TABLE term_offers (
+    id                  BIGSERIAL PRIMARY KEY,
+    investor_id         INTEGER REFERENCES investor_file (id),
+    thread_ref          TEXT,
+    source_message_id   TEXT,
+    raw_text            TEXT NOT NULL,
+    detected_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status              TEXT NOT NULL DEFAULT 'escalated'
+                            CHECK (status IN ('escalated', 'acknowledged', 'closed')),
+    founder_notes       TEXT
+);
+
 -- ============================================================================
 -- STAGE 2 ADDITIONS -- inbox drafts + draft survival measurement
 -- ============================================================================
@@ -238,6 +424,9 @@ CREATE TABLE drafts (
     gmail_thread_id     TEXT NOT NULL,
     gmail_message_id    TEXT NOT NULL,          -- inbound message this decision was made on
     gmail_draft_id      TEXT,                   -- set once create_draft succeeds; NULL if never drafted
+    contact_id          BIGINT REFERENCES contact_identities (id),
+    sender_provider     TEXT,
+    sender_mailbox_id   BIGINT REFERENCES sender_mailboxes (id),
     investor_id         INTEGER REFERENCES investor_file (id),
     sender_email        TEXT,
     sender_seniority    TEXT NOT NULL DEFAULT 'unknown'
@@ -267,6 +456,7 @@ CREATE TABLE drafts (
 
 CREATE INDEX idx_drafts_status ON drafts (status);
 CREATE INDEX idx_drafts_thread ON drafts (gmail_thread_id);
+CREATE INDEX idx_drafts_contact ON drafts (contact_id);
 CREATE UNIQUE INDEX idx_drafts_gmail_draft_id ON drafts (gmail_draft_id) WHERE gmail_draft_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_drafts_message_id ON drafts (gmail_message_id);
 

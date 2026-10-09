@@ -48,6 +48,18 @@ def check_question(template, facts):
             result["renderable"] = False
             continue
 
+        if fact["source"] is None or fact["source"] == "":
+            result["findings"].append(
+                "field '{}': UNSOURCED (source is missing)".format(field_key)
+            )
+            result["renderable"] = False
+
+        if fact["as_of_date"] is None:
+            result["findings"].append(
+                "field '{}': UNDATED (as_of_date is missing)".format(field_key)
+            )
+            result["renderable"] = False
+
         if fact["refresh_by"] is not None and fact["refresh_by"] < today:
             result["findings"].append(
                 "field '{}': STALE (refresh_by {} has passed)".format(field_key, fact["refresh_by"])
@@ -68,8 +80,46 @@ def check_question(template, facts):
 
 def load_facts(cur):
     """Load all canon_facts into an in-memory dict keyed by field_key."""
-    cur.execute("SELECT field_key, value, refresh_by, agent_quotable FROM canon_facts")
+    cur.execute(
+        "SELECT field_key, value, source, as_of_date, refresh_by, "
+        "agent_quotable, is_public FROM canon_facts"
+    )
     return {
-        row[0]: {"value": row[1], "refresh_by": row[2], "agent_quotable": row[3]}
+        row[0]: {
+            "value": row[1],
+            "source": row[2],
+            "as_of_date": row[3],
+            "refresh_by": row[4],
+            "agent_quotable": row[5],
+            "is_public": row[6],
+        }
         for row in cur.fetchall()
     }
+
+
+def load_current_story(cur):
+    """Load the founder-signed story pack sections keyed by section_key."""
+    cur.execute(
+        "SELECT section_key, content FROM story_pack_current ORDER BY section_key"
+    )
+    return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def check_outbound_fact(facts, field_key):
+    """Return a public, current fact suitable for a cold first note."""
+    fact = facts.get(field_key)
+    if fact is None:
+        raise ValueError("canon_facts.{} does not exist".format(field_key))
+    if fact["value"] is None:
+        raise ValueError("canon_facts.{} is missing".format(field_key))
+    if not fact["source"]:
+        raise ValueError("canon_facts.{} is unsourced".format(field_key))
+    if not fact["as_of_date"]:
+        raise ValueError("canon_facts.{} is undated".format(field_key))
+    if fact["refresh_by"] is not None and fact["refresh_by"] < datetime.date.today():
+        raise ValueError("canon_facts.{} is stale".format(field_key))
+    if not fact["agent_quotable"]:
+        raise ValueError("canon_facts.{} is not agent-quotable".format(field_key))
+    if not fact["is_public"]:
+        raise ValueError("canon_facts.{} is not public".format(field_key))
+    return fact["value"]

@@ -35,6 +35,10 @@ SCOPES = [
     # Sheets -- read+write, backs view_tracker.py's own link-click
     # tracker (the actual view-tracking source of truth now).
     "https://www.googleapis.com/auth/spreadsheets",
+    # Calendar -- required only for Scheduler. Existing cached tokens must be
+    # re-authorized after adding these scopes.
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
 ]
 
 

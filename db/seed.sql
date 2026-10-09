@@ -20,6 +20,9 @@
 -- diligence pass asks for.
 
 INSERT INTO canon_facts (field_key, field_label, category, agent_quotable) VALUES
+    ('founder_name',                 'Founder name for sign-off',             'team',        TRUE),
+    ('company_name',                 'Company name',                         'other',       TRUE),
+    ('sector',                       'Sector',                               'other',       TRUE),
     ('currency_of_revenue',        'Currency of revenue',                     'fx',          TRUE),
     ('fx_exposure_notes',          'FX exposure notes',                       'fx',          TRUE),
     ('revenue_split_by_market',    'Revenue split by market',                 'financials',  TRUE),

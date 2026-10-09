@@ -99,5 +99,7 @@ thread opted into testing. Nothing else defines scope.
   separate replies.
 - The legal/price/personal, meeting-request, and data-room keyword lists in
   `classify_thread.py` are a first-pass draft, not founder-reviewed.
-- Meeting and data-room requests are only flagged, never acted on (Scheduler
-  and Data Room are Stage 3+).
+- Meeting requests are persisted once per thread and handed to Scheduler.
+  Scheduler may propose slots after explicit founder approval, but creating a
+  tentative Calendar hold still requires the founder to select a proposed
+  slot. Data-room access remains a separate founder action.

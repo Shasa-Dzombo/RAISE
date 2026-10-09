@@ -31,7 +31,9 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from render_lib import check_question, load_facts  # noqa: E402
+from manager_preflight import lock_thread, preflight  # noqa: E402
 from question_match import all_matches  # noqa: E402
+from contact_provider import ensure_contact  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -89,7 +91,8 @@ def classify(thread, target_message_id, founder_email, investor_row, facts, ques
     if investor_row and investor_row.get("do_not_contact"):
         return {"classification": "do_not_contact_skip", "notes": f"Firm '{investor_row['firm_name']}' is on the do-not-contact list."}
 
-    # 3. legal/price/personal
+    # 3. legal/price/personal -- the caller persists a term_offers snapshot
+    # for this hard-stop class before any other specialist can act.
     hit = contains_any(body, LEGAL_PRICE_PERSONAL_KEYWORDS)
     if hit:
         return {"classification": "legal_price_personal_escalate", "notes": f"Message contains restricted keyword: '{hit}'."}
@@ -135,12 +138,12 @@ def classify(thread, target_message_id, founder_email, investor_row, facts, ques
     # 5. meeting request
     hit = contains_any(body, MEETING_KEYWORDS)
     if hit:
-        return {"classification": "meeting_request_flag", "notes": f"Meeting-request keyword: '{hit}'. Scheduler isn't built yet (Stage 3+) -- founder should follow up."}
+        return {"classification": "meeting_request_flag", "notes": f"Meeting-request keyword: '{hit}'. Hand off to Scheduler for timezone-safe slot proposals and founder approval."}
 
     # 6. data room request
     hit = contains_any(body, DATA_ROOM_KEYWORDS)
     if hit:
-        return {"classification": "data_room_request_flag", "notes": f"Data-room-request keyword: '{hit}'. Data room isn't built yet (Stage 3+) -- founder should follow up."}
+        return {"classification": "data_room_request_flag", "notes": f"Data-room-request keyword: '{hit}'. Hand off to Data Room for tier approval and access checks."}
 
     # 7. fallback
     return {"classification": "unknown_question_escalate", "notes": "No question_bank match found above threshold."}
@@ -175,28 +178,123 @@ def main():
             investor_row = None
             if sender_email:
                 cur.execute(
-                    "SELECT id, firm_name, do_not_contact, partner_seniority FROM investor_file WHERE lower(partner_email) = %s",
-                    (sender_email,),
+                    """
+                    SELECT i.id, i.firm_name, i.do_not_contact, i.partner_seniority,
+                           i.partner_email, i.working_language
+                    FROM investor_file i
+                    LEFT JOIN contact_identities c ON c.investor_id = i.id
+                        AND c.normalized_email = %s AND c.active = TRUE
+                    WHERE lower(i.partner_email) = %s OR c.id IS NOT NULL
+                    ORDER BY c.id NULLS LAST
+                    LIMIT 1
+                    """,
+                    (sender_email, sender_email),
                 )
                 row = cur.fetchone()
                 if row:
-                    investor_row = {"id": row[0], "firm_name": row[1], "do_not_contact": row[2], "partner_seniority": row[3]}
+                    investor_row = {
+                        "id": row[0], "firm_name": row[1], "do_not_contact": row[2],
+                        "partner_seniority": row[3], "partner_email": row[4],
+                        "working_language": row[5],
+                    }
+            contact_id = ensure_contact(
+                cur,
+                sender_email,
+                investor_row["id"] if investor_row else None,
+                source="inbound",
+            ) if sender_email else None
 
             decision = classify(thread, args.target_message_id, founder_email, investor_row, facts, questions)
+
+            if decision["classification"] == "thread_locked_skip":
+                lock_thread(
+                    conn,
+                    thread["id"],
+                    investor_row["id"] if investor_row else None,
+                    decision["notes"],
+                )
+
+            if decision["classification"] == "meeting_request_flag":
+                cur.execute(
+                    """
+                    INSERT INTO scheduling_requests
+                        (investor_id, thread_ref, requested_by_email, request_text, status)
+                    VALUES (%s, %s, %s, %s, 'awaiting_founder')
+                    ON CONFLICT (thread_ref) DO NOTHING
+                    """,
+                    (
+                        investor_row["id"] if investor_row else None,
+                        thread["id"],
+                        sender_email,
+                        target.get("plaintextBody") or "",
+                    ),
+                )
+
+            if decision["classification"] == "legal_price_personal_escalate":
+                cur.execute(
+                    """
+                    INSERT INTO term_offers
+                        (investor_id, thread_ref, source_message_id, raw_text)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (
+                        investor_row["id"] if investor_row else None,
+                        thread["id"],
+                        args.target_message_id,
+                        target.get("plaintextBody") or "",
+                    ),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO escalations
+                        (thread_ref, investor_id, escalation_type, reason, created_by)
+                    VALUES (%s, %s, 'term_or_restricted_language', %s, 'Inbox')
+                    """,
+                    (
+                        thread["id"],
+                        investor_row["id"] if investor_row else None,
+                        decision["notes"],
+                    ),
+                )
+
+            if decision["classification"] == "known_question_draft":
+                cited_keys = check_question(
+                    next(q["answer_template"] for q in questions if q["id"] == decision["question_id"]),
+                    facts,
+                )["placeholders"]
+                gate = preflight(
+                    conn,
+                    thread_ref=thread["id"],
+                    investor_id=investor_row["id"] if investor_row else None,
+                    recipient_email=sender_email,
+                    draft_text=decision.get("draft_text") or "",
+                    cited_fact_keys=cited_keys,
+                    recipient_language=investor_row.get("working_language", "en") if investor_row else "en",
+                    recipient_seniority=investor_row.get("partner_seniority", "unknown") if investor_row else "unknown",
+                    build_stage=4,
+                    outbound_kind="draft",
+                )
+                if not gate["allowed"]:
+                    decision = {
+                        "classification": "unknown_question_escalate",
+                        "notes": "Manager preflight blocked the draft: " + "; ".join(gate["failures"]),
+                    }
 
             cur.execute(
                 """
                 INSERT INTO drafts (
                     gmail_thread_id, gmail_message_id, investor_id, sender_email,
+                    contact_id, sender_provider,
                     sender_seniority, classification, question_id, match_score,
                     draft_text, status, notes
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, 'gmail', %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
                     thread["id"], args.target_message_id,
                     investor_row["id"] if investor_row else None,
                     sender_email,
+                    contact_id,
                     investor_row["partner_seniority"] if investor_row else "unknown",
                     decision["classification"],
                     decision.get("question_id"),

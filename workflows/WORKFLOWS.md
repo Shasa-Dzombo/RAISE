@@ -70,7 +70,9 @@ Email arrives
   -> Contains a question?
         -> in question bank?  -> Diligence returns approved answer
         -> not in bank?       -> Diligence drafts UNAPPROVED -> founder signs
-  -> Contains meeting request?               -> Scheduler
+  -> Contains meeting request?               -> Scheduler persists one request per thread
+  -> Founder approves request?               -> Scheduler reads Calendar and proposes slots
+  -> Founder selects a proposed slot?        -> Create one tentative hold
   -> Contains data room request?             -> Data room (founder approves tier)
   -> Inbox composes reply
   -> Manager runs all 8 pre-send checks

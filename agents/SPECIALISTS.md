@@ -100,7 +100,7 @@ Handling ladder:
 | Question not in the bank | Draft nothing. Escalate to Diligence. |
 | Partner-level sender | Draft only. Never unattended send. |
 | Thread turns legal, price, or personal | Stop. Escalate to founder immediately. |
-| Meeting request | Hand to Scheduler. |
+| Meeting request | Persist one request per thread and hand to Scheduler. Scheduler proposes slots after founder approval; founder selection is required for a tentative hold. |
 | Data room request | Hand to Data room. |
 | Founder has already replied in this thread | Locked. Do nothing. |
 

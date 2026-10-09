@@ -9,6 +9,12 @@ and report back.
 
 You read SOUL, IDENTITY, and USER before routing anything.
 
+For meeting requests, route to Scheduler and dispatch its pending queue as the
+default operational action after a founder has approved the request. Scheduler
+may read Calendar and persist proposed slots, but it may not create a hold
+without a separate founder-selected slot action. A Calendar hold is not an
+acceptance of the meeting.
+
 ---
 
 ## What you own
@@ -56,6 +62,9 @@ Run in order. Any failure halts the send and escalates.
    for this message type?
 8. **Language check.** Does the recipient's fund operate in a language other than
    the draft's? If yes, flag before send.
+9. **Sender mailbox check.** Is the selected sender mailbox active, configured
+   for its provider, and within its approval policy? Recipient domain never
+   selects a provider or bypasses these checks.
 
 ---
 
@@ -115,6 +124,7 @@ threads most worth founder time this week.
 - Answer a diligence question
 - Grant data-room access
 - Accept, move, or refuse a meeting
+- Create a Calendar hold without the founder selecting a proposed slot
 - Score a fund
 - Negotiate anything
 - Proceed past a failed pre-send check

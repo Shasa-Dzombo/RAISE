@@ -40,7 +40,9 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mcp_gmail_client import MCPGmailClient  # noqa: E402
 from classify_thread import classify  # noqa: E402
+from contact_provider import ensure_contact  # noqa: E402
 from render_lib import check_question, load_facts  # noqa: E402
+from scheduler import create_request  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -159,22 +161,49 @@ def make_tool_impls(db_cur, founder_email, scope_label, label_ids, gmail):
         investor_row = None
         if sender_email:
             db_cur.execute(
-                "SELECT id, firm_name, do_not_contact, partner_seniority FROM investor_file WHERE lower(partner_email) = %s",
-                (sender_email,),
+                """
+                SELECT i.id, i.firm_name, i.do_not_contact, i.partner_seniority
+                FROM investor_file i
+                LEFT JOIN contact_identities c ON c.investor_id = i.id
+                    AND c.normalized_email = %s AND c.active = TRUE
+                WHERE lower(i.partner_email) = %s OR c.id IS NOT NULL
+                ORDER BY c.id NULLS LAST
+                LIMIT 1
+                """,
+                (sender_email, sender_email),
             )
             row = db_cur.fetchone()
             if row:
                 investor_row = {"id": row[0], "firm_name": row[1], "do_not_contact": row[2], "partner_seniority": row[3]}
 
         decision = classify(thread, target_message_id, founder_email, investor_row, facts, questions)
+        contact_id = ensure_contact(
+            db_cur,
+            sender_email,
+            investor_row["id"] if investor_row else None,
+            source="inbound",
+        ) if sender_email else None
+
+        if decision["classification"] == "meeting_request_flag":
+            create_request(
+                db_cur.connection,
+                investor_row["id"] if investor_row else None,
+                thread_id,
+                sender_email,
+                None,
+                target.get("plaintextBody") or "",
+                founder_approval_required=True,
+            )
 
         db_cur.execute(
             """
             INSERT INTO drafts (gmail_thread_id, gmail_message_id, investor_id, sender_email,
-                sender_seniority, classification, question_id, match_score, draft_text, status, notes)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                contact_id, sender_provider, sender_seniority, classification, question_id,
+                match_score, draft_text, status, notes)
+            VALUES (%s,%s,%s,%s,%s,'gmail',%s,%s,%s,%s,%s,%s,%s) RETURNING id
             """,
             (thread_id, target_message_id, investor_row["id"] if investor_row else None, sender_email,
+             contact_id,
              investor_row["partner_seniority"] if investor_row else "unknown", decision["classification"],
              decision.get("question_id"), decision.get("match_score"), decision.get("draft_text"),
              "not_drafted", decision.get("notes")),

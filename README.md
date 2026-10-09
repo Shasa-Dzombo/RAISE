@@ -25,13 +25,13 @@ status per specialist, the real Postgres tables, and two interactive demos
 | # | Specialist | Status | Notes |
 |---|---|---|---|
 | 1 | Scout | Built & verified | Researches funds, writes one-page notes to `investor_file`, needs founder approval |
-| 2 | Outreach | Built & verified | Drafts first notes by capital type, never sends |
+| 2 | Outreach | Built & verified | Drafts first notes by capital type from public, sourced facts and a signed story pack; never sends |
 | 3 | Inbox | Built & verified | Classifies replies, drafts known-question answers, escalates everything else |
 | 4 | Diligence | Partially built | `question_bank` + drift test exist; no standalone escalation-review script yet |
 | 5 | Data Room | Built & verified, with a known gap | Drive folders/watermarking/restricted sharing work; per-viewer view-tracking does not (see [Known limitations](#known-limitations)) |
-| 6 | Scheduler | Not built | — |
-| 7 | Pipeline | Not built | `investor_file.process_stage` tracks stage, but no board/report script |
-| 8 | Terms | Not built | — |
+| 6 | Scheduler | Foundation built | Calendar-truth slot proposals, approval-gated holds, expiry |
+| 7 | Pipeline | Foundation built | Event-backed transitions, board, behavioural weekly review |
+| 8 | Terms | Safety lane built | Immutable offer capture and neutral comparison; no negotiation |
 
 Inbox can run two ways: driven interactively (Claude reads Gmail via MCP
 and calls `classify_thread.py`), or fully standalone via
@@ -282,6 +282,62 @@ python scripts/data_room.py report
 `workflows/DATA_ROOM_PROCEDURE.md`, including the
 [known view-tracking gap](#known-limitations).
 
+### Scheduler — propose calendar-safe slots
+
+```bash
+python scripts/scheduler.py dispatch
+python scripts/scheduler.py expire
+```
+
+Inbox meeting requests are handed to Scheduler as `scheduling_requests`.
+The Manager-routed default is to process founder-approved requests and propose
+slots from active fundraising calendar blocks. This reads Google Calendar busy
+events and writes idempotent proposals; it never creates a Calendar hold,
+accepts, refuses, or moves an accepted event. The founder must approve the
+request through `founder_actions.approve_scheduling_request`, then select one
+proposal through `founder_actions.approve_scheduling_slot` to create exactly
+one tentative hold. Provider/calendar failures become escalations.
+
+Recipient addresses are transport-neutral: a fund contact may use Gmail,
+Microsoft 365, Zoho, or a custom company domain. RAISE matches the exact
+normalized address for threading and access grants. The current working sender
+adapter is Gmail and remains draft-only; `contact_identities` and
+`sender_mailboxes` record provider metadata without storing credentials.
+
+### Pipeline — evidence-backed board and review
+
+```bash
+python scripts/pipeline.py board
+python scripts/pipeline.py weekly-review
+```
+
+Pipeline transitions are recorded in `pipeline_events`; the mutable board is
+only the current view. Weekly output surfaces staleness, overdue actions,
+diligence, data-room, meeting, and partner-involvement evidence. It never
+passes or drops a firm automatically.
+
+### Terms — capture and compare, never negotiate
+
+```bash
+python scripts/terms.py --investor-id 2 --investor-id 3
+```
+
+Term-sheet, valuation, dilution, board, exclusivity, no-shop, and signature
+language freezes the thread, records the raw message in `term_offers`, and
+creates an escalation. The comparison command presents source text only for
+founder and counsel review.
+
+### Manager — generate review reports
+
+```bash
+python scripts/digest.py daily
+python scripts/digest.py weekly
+```
+
+Reports are written to the review/audit record and are idempotent for the
+same day or weekly period. Delivery remains a separate founder-approved
+workflow; report generation never sends email or Slack messages.
+
 ### Drift test — the Stage-1 correctness check
 
 ```bash
@@ -289,8 +345,14 @@ python scripts/drift_test.py
 ```
 
 Renders every `question_bank` answer from `canon_facts` and flags
-anything unsourced, stale (past `refresh_by`), not agent-quotable, or
-containing a raw number outside a `{{field_key}}` placeholder.
+anything unsourced, undated, stale (past `refresh_by`), not
+agent-quotable, or containing a raw number outside a
+`{{field_key}}` placeholder.
+
+Stage 4 first-note drafting applies the same gate: every cited fact must be
+public, sourced, dated, fresh, and agent-quotable, and the company one-liner
+must come from a founder-signed `story_pack` section. The draft command creates
+a Gmail draft only; a person still sends it manually.
 
 ---
 
@@ -326,8 +388,8 @@ containing a raw number outside a `{{field_key}}` placeholder.
   (`data_room.py report`) is not currently a trustworthy signal. Full
   detail and a considered (and paused, on cost/infra grounds) alternative
   in `workflows/DATA_ROOM_PROCEDURE.md`.
-- **Diligence, Scheduler, Pipeline, Terms** have no dedicated scripts yet
-  — see the status table above.
+- **Diligence** still has no standalone escalation-review script; its
+  question-bank and drift-test primitives remain the source of truth.
 - **Question matching** (`scripts/question_match.py`) is a token-overlap
   heuristic, not semantic — `question_bank.embedding` exists and is unused,
   ready for a future upgrade.
